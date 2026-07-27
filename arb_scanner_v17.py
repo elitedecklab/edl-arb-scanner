@@ -80,6 +80,26 @@ SET_TYPE_LIMITS = {
     "chaos rising":  {"BB_CASE", "ETB_CASE"},
 }
 
+# "Mega Evolution" and "Scarlet & Violet" are BASE set names AND the era prefix
+# printed on every later set in their era ("Mega Evolution-Phantasmal Flames").
+# set_tokens() therefore reduces the base sets to {mega, evolution} / {scarlet,
+# violet}, which every era listing also satisfies — so an Ascended Heroes ETB
+# would match the base Mega Evolution ETB and get valued at the wrong market.
+# Each base set must exclude its siblings' names. Keep these lists updated as
+# new sets in either era release.
+ERA_SIBLING_EXCLUDES = {
+    "mega evolution": ["phantasmal flames", "ascended heroes", "perfect order",
+                       "chaos rising", "pitch black", "mega rising"],
+    "scarlet violet": ["paldea evolved", "obsidian flames", "151", "paradox rift",
+                       "paldean fates", "temporal forces", "twilight masquerade",
+                       "shrouded fable", "stellar crown", "surging sparks",
+                       "prismatic evolutions", "journey together", "destined rivals",
+                       "white flare", "black bolt"],
+    # Note: "151" is matched as a plain substring, so a base Scarlet & Violet
+    # listing containing those digits for another reason is skipped. Losing an
+    # occasional base-set hit beats valuing a 151 product at base-set market.
+}
+
 ENABLED_TYPES = ["ETB", "PC_ETB", "BB", "BUNDLE", "UPC", "SPC",
                  "ETB_CASE", "PC_ETB_CASE", "BB_CASE", "BUNDLE_CASE", "MINI_TIN_DISPLAY"]
 
@@ -355,10 +375,12 @@ def build_universe(keys, setid_map, dump=False):
                 continue
             t, name = TYPES[key], (base.get("name") or "").strip()
             q = name if "pokemon" in name.lower() else "Pokemon " + name
+            # A base era set must not swallow listings from its own era's sets.
+            excl = t["exclude"] + ERA_SIBLING_EXCLUDES.get(norm(sn), [])
             uni.append({"product_id": str(base.get("id")), "set_name": sn, "type_key": key,
                         "type_label": t["label"], "is_case": key in CASE_TYPES, "name": name,
                         "market": round(float(mv), 2), "img": base.get("img_url"), "query": q,
-                        "require": [[s] for s in set_tokens(sn)] + t["require"], "exclude": t["exclude"]})
+                        "require": [[s] for s in set_tokens(sn)] + t["require"], "exclude": excl})
     uni.sort(key=lambda x: (x["set_name"], x["is_case"], x["type_label"]))
     if dump:
         try:
