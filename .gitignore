@@ -1,0 +1,21 @@
+# --- secrets: never commit. On Render set these as environment variables:
+#     EBAY_APP_ID, EBAY_CERT_ID, POKEDATA_KEY
+eBay Keys.txt
+Pokedata Keys.txt
+*Keys.txt
+
+# --- generated at runtime (rebuilt on every run) ---
+dashboard.html
+opps.json
+opps.json.bak
+price_alerts.json
+market_cache.json
+catalog_dump.csv
+universe_market.csv
+
+# --- local probe/debug output ---
+*_output.txt
+gem_probe*.txt
+
+__pycache__/
+*.pyc

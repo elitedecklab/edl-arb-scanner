@@ -64,14 +64,22 @@ PRIORITY_SETS = ["Ascended Heroes", "Destined Rivals", "Prismatic Evolutions", "
                  "Crown Zenith", "Twilight Masquerade",
                  # Mega Evolution era additions
                  "Mega Evolution", "Phantasmal Flames", "Pitch Black",
+                 "Perfect Order", "Chaos Rising",
                  # Earlier Scarlet & Violet era additions
                  "Scarlet & Violet", "Paldea Evolved", "Obsidian Flames", "151",
                  "Paradox Rift", "Paldean Fates", "Temporal Forces", "Shrouded Fable",
                  "Stellar Crown"]
-# Perfect Order and Chaos Rising were dropped from eBay scanning 2026-07-26 to
-# make room for Phantasmal Flames and Pitch Black without raising call volume.
-# We still sell both, so the price guard keeps watching them (see EXTRA_SETS in
-# edl_price_guard.py) — Pokedata lookups cost nothing against the eBay quota.
+# Per-set narrowing of ENABLED_TYPES. A set listed here is scanned on eBay ONLY
+# for the type keys given; everything else in that set is skipped. Sets absent
+# from this map are scanned for all ENABLED_TYPES as usual.
+# 2026-07-26: we have enough Perfect Order / Chaos Rising sealed singles, so eBay
+# scanning for them is narrowed to case-sized buys only. This does NOT affect the
+# storefront price guard, which still checks every product in both sets.
+SET_TYPE_LIMITS = {
+    "perfect order": {"BB_CASE", "ETB_CASE"},
+    "chaos rising":  {"BB_CASE", "ETB_CASE"},
+}
+
 ENABLED_TYPES = ["ETB", "PC_ETB", "BB", "BUNDLE", "UPC", "SPC",
                  "ETB_CASE", "PC_ETB_CASE", "BB_CASE", "BUNDLE_CASE", "MINI_TIN_DISPLAY"]
 
@@ -331,12 +339,15 @@ def build_universe(keys, setid_map, dump=False):
         sid = setid_map.get(norm(sn))
         if sid is None:
             log(f"skip {sn!r}: no set_id found"); continue
+        allowed = SET_TYPE_LIMITS.get(norm(sn))       # None = scan every enabled type
         cand = defaultdict(list)
         for p in get_catalog(keys, sid):
             key = select_type(p.get("name", ""))
             if key: cand[key].append(p)
             if dump:
                 dump_rows.append([sn, p.get("id"), p.get("name"), p.get("market_value"), key or ""])
+        if allowed is not None:
+            cand = defaultdict(list, {k: v for k, v in cand.items() if k in allowed})
         for key, plist in cand.items():
             base = pick_base(plist)
             mv = base.get("market_value")
