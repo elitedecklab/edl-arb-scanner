@@ -68,7 +68,21 @@ PRIORITY_SETS = ["Ascended Heroes", "Destined Rivals", "Prismatic Evolutions", "
                  # Earlier Scarlet & Violet era additions
                  "Scarlet & Violet", "Paldea Evolved", "Obsidian Flames", "151",
                  "Paradox Rift", "Paldean Fates", "Temporal Forces", "Shrouded Fable",
-                 "Stellar Crown"]
+                 "Stellar Crown",
+                 # 2026-07-27: Sword & Shield era backfill. The scanner previously
+                 # covered only Silver Tempest and Crown Zenith out of 18 S&S sets.
+                 "Sword & Shield", "Rebel Clash", "Darkness Ablaze", "Champion's Path",
+                 "Vivid Voltage", "Shining Fates", "Battle Styles", "Chilling Reign",
+                 "Evolving Skies", "Celebrations", "Fusion Strike", "Brilliant Stars",
+                 "Astral Radiance", "Pokemon GO", "Lost Origin",
+                 "Trading Card Game Classic",
+                 # 2026-07-27: promo / collab sets across all three eras
+                 "Sword & Shield Promo", "Celebrations: Classic Collection",
+                 "Trick or Trade 2022", "Mcdonald's 25th Anniversary",
+                 "Mcdonald's Promos 2022", "Scarlet & Violet Promos",
+                 "Trick or Trade 2023", "Trick or Trade 2024",
+                 "McDonald's Promos 2023", "Mcdonald's Dragon Discovery",
+                 "Mega Evolution Promos"]
 # Per-set narrowing of ENABLED_TYPES. A set listed here is scanned on eBay ONLY
 # for the type keys given; everything else in that set is skipped. Sets absent
 # from this map are scanned for all ENABLED_TYPES as usual.
@@ -107,8 +121,32 @@ BIN_MAX_RATIO, AUCTION_MAX_RATIO, AUCTION_MAX_HOURS = 0.80, 0.70, 24
 SHIP_UNKNOWN_MAX_RATIO = 0.65
 BIN_MIN_RATIO, AUCTION_MIN_RATIO = 0.20, 0.10
 MARKET_REFRESH_HOURS = 6
-CYCLE_MINUTES = int(os.environ.get("EDL_CYCLE_MIN", "90"))
-MAX_CALLS_PER_CYCLE = int(os.environ.get("EDL_MAX_CALLS", "280"))
+# eBay's Browse API allows 5,000 calls/day per app key. MAX_CALLS_PER_CYCLE is
+# OUR budget, sized so (calls per sweep x cycles per day) stays under that cap.
+#
+# A full sweep costs roughly: 2 calls per universe product (one BIN search, one
+# auction search) + 1 call per active opp during validate(). Note build_universe
+# emits ONE row per (set, type) via pick_base, not one per raw product.
+#
+# 2026-07-27: the S&S + promo backfill took the universe from 156 to 233 products
+# (measured), so a sweep is ~466 scan + ~50 validate = ~516 calls. At the old
+# 90-minute cycle that would be ~8,250 calls/day -- well over the cap. A 4-hour
+# cycle gives 6 sweeps/day at ~516 calls = ~3,100/day, comfortably inside 5,000.
+#
+# The old 280 budget was ALREADY too small before this change: 156 products cost
+# ~362 calls, so scan() hit the ceiling and stopped partway. It restarts at index
+# 0 every cycle with no resume offset, so the alphabetical tail of the universe
+# (Stellar Crown through White Flare) was reached only in cycles where few opps
+# needed validating. If the universe ever outgrows the budget again, that silent
+# blind spot returns -- raise MAX_CALLS_PER_CYCLE rather than letting it truncate.
+#
+# Sealed prices don't move on a 90-minute timescale, and AUCTION_MAX_HOURS is 24,
+# so a 4-hour cycle still sees every ending auction with hours of lead time.
+#
+# If you change one of these, recheck the other: cycles_per_day = 1440/CYCLE_MINUTES
+# and cycles_per_day * MAX_CALLS_PER_CYCLE must stay under 5,000.
+CYCLE_MINUTES = int(os.environ.get("EDL_CYCLE_MIN", "240"))
+MAX_CALLS_PER_CYCLE = int(os.environ.get("EDL_MAX_CALLS", "780"))
 MIN_FEEDBACK_SCORE = int(os.environ.get("EDL_MIN_FEEDBACK", "1"))     # 0-feedback sellers excluded
 RATE_LIMIT_PAUSE_MIN = 60
 EBAY_MARKETPLACE = "EBAY_US"
@@ -128,7 +166,21 @@ SETID_FALLBACK = {"ascended heroes": 3591, "destined rivals": 567, "prismatic ev
                   # Earlier Scarlet & Violet era
                   "scarlet & violet": 510, "paldea evolved": 513, "obsidian flames": 517,
                   "151": 532, "paradox rift": 536, "paldean fates": 539,
-                  "temporal forces": 542, "shrouded fable": 548, "stellar crown": 549}
+                  "temporal forces": 542, "shrouded fable": 548, "stellar crown": 549,
+                  # Sword & Shield era (added 2026-07-27)
+                  "sword & shield": 6, "rebel clash": 5, "darkness ablaze": 4,
+                  "champion's path": 2, "vivid voltage": 3, "shining fates": 21,
+                  "battle styles": 20, "chilling reign": 26, "evolving skies": 108,
+                  "celebrations": 112, "fusion strike": 172, "brilliant stars": 178,
+                  "astral radiance": 182, "pokemon go": 387, "lost origin": 400,
+                  "trading card game classic": 561,
+                  # Promo / collab sets (added 2026-07-27)
+                  "sword & shield promo": 109, "celebrations: classic collection": 111,
+                  "trick or trade 2022": 504, "mcdonald's 25th anniversary": 171,
+                  "mcdonald's promos 2022": 399, "scarlet & violet promos": 515,
+                  "trick or trade 2023": 531, "trick or trade 2024": 554,
+                  "mcdonald's promos 2023": 530, "mcdonald's dragon discovery": 559,
+                  "mega evolution promos": 575}
 
 JUNK_BASE = ["accessories", "accessory", "sleeve", "empty", "opened", "open box", "code", "lot",
              "proxy", "loose", "magnetic", "protector", "acrylic", "sticker", "divider", "playmat",
