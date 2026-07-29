@@ -126,44 +126,58 @@ ENABLED_TYPES = ["ETB", "PC_ETB", "BB", "BUNDLE", "UPC", "SPC",
 #
 # Market values come from the same pokedata /api/products endpoint the Pokemon
 # path uses, so this works unchanged on Render.
-ONE_PIECE_SETS = [
-    (3202, "Romance Dawn", "OP01"),
-    (3198, "Paramount War", "OP02"),
-    (3195, "Pillars of Strength", "OP03"),
-    (3191, "Kingdoms of Intrigue", "OP04"),
-    (3188, "Awakening of the New Era", "OP05"),
-    (3185, "Wings of the Captain", "OP06"),
-    (3180, "500 Years in the Future", "OP07"),
-    (3177, "Two Legends", "OP08"),
-    (3166, "Emperors in the New World", "OP09"),
-    (3163, "Royal Blood", "OP10"),
-    (3154, "A Fist of Divine Speed", "OP11"),
-    (3152, "Legacy of the Master", "OP12"),
-    (3631, "Carrying On His Will", "OP13"),
-    (3629, "The Azure Sea's Seven", "OP14"),
-    (3182, "Extra Booster Memorial Collection", "EB01"),
-    (3627, "Extra Booster One Piece Heroines Edition", "EB03"),
-    (3170, "Premium Booster The Best", "PRB01"),
-    (3150, "Premium Booster The Best Vol 2", "PRB02"),
-]
-
-# pokedata carries no sealed PRODUCTS for the newest sets yet -- verified
-# 2026-07-29: /api/products returns 0 rows for OP15, OP16 and ST-30 (cards only).
-# These are exactly the sets with the most active listings, so they get a manual
-# market value sourced from PriceCharting.
+# pokedata's /api/products accepts a `q` parameter that it IGNORES, returning the
+# ENTIRE product catalogue (~8,700 rows across every TCG) in a single call. That
+# is both cheaper than 20 per-set calls and strictly more complete, because
+# 752 products (8.6%) carry set_id=None and are invisible to any set-based lookup.
 #
-# THESE GO STALE. The scanner logs a warning every cycle it uses one, and logs
-# when pokedata starts carrying the product so the entry can be deleted. Review
-# whenever you see that message.
+# That orphan behaviour is why an earlier version of this file wrongly concluded
+# pokedata had no OP15 booster box: "Adventure on Kami's Island Booster Box"
+# (id 3902, $260) exists but carries no set_id, so /api/products?set_id=3836
+# returns nothing. Building from the full catalogue fixes it and needs no set list.
+#
+# Verified 2026-07-29: zero orphaned Pokemon BOOSTERBOX products, so the Pokemon
+# path (still set-by-set) is not missing boxes. Its orphans are TIN / DECK /
+# COLLECTIONBOX types the scanner does not scan anyway.
+
+# Only for sets pokedata has no product row for at all. OP16 released 2026-06-12
+# and still is not in the catalogue. The scanner warns each cycle it falls back to
+# one of these, and warns again once pokedata catches up so it can be deleted.
 OP_MANUAL_MARKET = {
-    # set_id: (set name, set code, booster box market value, as-of date)
-    3875: ("The Time of Battle", "OP16", 202.50, "2026-07-29"),
-    3836: ("Adventure on Kami's Island", "OP15", 240.22, "2026-07-29"),
+    "the time of battle": ("The Time of Battle", "OP16", 202.50, "2026-07-29"),
 }
 
-# One Piece booster boxes must never match Pokemon listings, or a $200 One Piece
-# box gets valued against a Pokemon set's market. "one piece" is required on
-# every title and "pokemon" is excluded.
+# Set codes for the identifier group. Keys are matched through norm(), which
+# turns punctuation into spaces -- so "the azure sea's seven" is looked up as
+# "the azure sea s seven". Writing the keys in raw form and comparing directly
+# silently missed three sets.
+#
+# A missing code is not harmless here: without one, a set falls back to name
+# words, and if those are all generic the entry ends up unmatchable (see
+# GENERIC_TOKENS below).
+OP_SET_CODES = {
+    "romance dawn": "OP01", "paramount war": "OP02", "pillars of strength": "OP03",
+    "kingdoms of intrigue": "OP04", "awakening of the new era": "OP05",
+    "wings of the captain": "OP06", "500 years in the future": "OP07",
+    "two legends": "OP08", "emperors in the new world": "OP09",
+    "royal blood": "OP10", "a fist of divine speed": "OP11",
+    "legacy of the master": "OP12", "carrying on his will": "OP13",
+    "the azure sea's seven": "OP14", "adventure on kami's island": "OP15",
+    "the time of battle": "OP16", "memorial collection": "EB01",
+    "extra booster one piece heroines edition": "EB03",
+    "premium booster": "PRB01", "premium booster vol. 2": "PRB02",
+}
+
+# Words that identify no set on their own. Left in, "Premium Booster" (PRB-01,
+# ~$950) and "Premium Booster Vol. 2" (PRB-02, ~$395) both reduce to
+# {premium, booster} and match each other's listings -- which would price a
+# PRB-02 box against PRB-01's market and flag an ordinary listing as a 2.4x
+# steal. Dropping them forces those sets onto their set codes.
+OP_GENERIC_TOKENS = {"booster", "premium", "collection", "extra", "piece", "onepiece"}
+
+# Products that carry type=BOOSTERBOX in pokedata but are not a booster box.
+OP_NOT_A_BOX = {"treasure booster set"}
+
 OP_BOX_REQUIRE = [["one piece"], ["booster box", "booster display"]]
 
 BIN_MAX_RATIO, AUCTION_MAX_RATIO, AUCTION_MAX_HOURS = 0.80, 0.70, 24
@@ -460,93 +474,146 @@ def pick_base(plist):
     pool.sort(key=lambda p: (len(p.get("name", "")), int(p["id"]) if str(p.get("id", "")).isdigit() else 0))
     return pool[0]
 
-def op_box_variant_filters(name):
-    """Distinguish One Piece print waves so a box isn't valued at the wrong market.
+def get_all_products(keys):
+    """Whole pokedata product catalogue in one call (the `q` param is ignored)."""
+    cache = get_all_products._cache
+    c = cache.get("all")
+    if c and (time.time() - c["ts"]) < MARKET_REFRESH_HOURS * 3600:
+        return c["products"]
+    try:
+        r = requests.get("https://www.pokedata.io/api/products",
+                         headers={"Authorization": f"Bearer {keys.pokedata}"},
+                         params={"q": "all"}, timeout=90)
+        if r.status_code != 200 or not isinstance(r.json(), list):
+            return c["products"] if c else []
+        prods = r.json()
+        cache["all"] = {"ts": time.time(), "products": prods}
+        time.sleep(POLITE_SLEEP)
+        return prods
+    except Exception as e:
+        log(f"full product catalogue error: {e}")
+        return c["products"] if c else []
+get_all_products._cache = {}
 
-    OP01 exists as Wave 1 (blue bottom, ~$6.3k) and Wave 2 (white bottom, ~$1.6k)
-    with identical cards. Valuing a white-bottom box against the blue market would
-    make an ordinary listing look like a 4x steal, so each wave carries its own
-    require/exclude terms.
-    """
-    n = norm(name)
-    if "wave 1" in n or "blue" in n:
-        return [["blue"]], []                    # only match explicit blue-bottom
-    if "wave 2" in n or "white" in n:
-        return [], ["blue"]                      # default box; never match blue
-    return [], []
+
+def op_set_name_from_product(pname):
+    """'Adventure on Kami\'s Island Booster Box' -> 'Adventure on Kami\'s Island'."""
+    n = re.sub(r"(?i)\s*-?\s*booster\s+box.*$", "", (pname or "").strip())
+    n = re.sub(r"(?i)\s*-?\s*display.*$", "", n)
+    n = re.sub(r"\s*-\s*$", "", n).strip()
+    return n or (pname or "").strip()
 
 
 def op_identifier_group(sname, code):
     """Accept EITHER the set code or a distinctive set word.
 
-    Sellers often title a box "One Piece OP-16 Booster Box" with no set name at
-    all. Requiring every set-name token would silently miss those. Short tokens
-    are dropped so a generic word can't create a false match; "one piece" and
-    "booster box" are required separately, so this group only has to identify
-    WHICH set.
+    Sellers often title a box "One Piece OP-16 Booster Box" with no set name, so
+    requiring every set-name token would silently miss those. Short words are
+    dropped so a generic term cannot create a false match; "one piece" and
+    "booster box" are required separately, so this group only identifies WHICH set.
+
+    norm() converts hyphens to SPACES, so "OP-16" in a title becomes "op 16" --
+    both the joined and spaced spellings are matched, never the hyphenated one.
     """
-    # norm() converts hyphens to SPACES, so "OP-16" in a title becomes "op 16".
-    # Cover the joined and spaced spellings; the hyphenated form never survives norm.
-    letters = code.rstrip("0123456789").lower()
-    digits = code[len(letters):]
-    alts = [f"{letters}{digits}", f"{letters} {digits}"]
-    alts += [t for t in set_tokens(sname) if len(t) >= 6]
+    alts = []
+    if code:
+        letters = code.rstrip("0123456789").lower()
+        digits = code[len(letters):]
+        alts += [f"{letters}{digits}", f"{letters} {digits}"]
+    alts += [t for t in set_tokens(sname)
+             if len(t) >= 6 and t not in OP_GENERIC_TOKENS]
     seen, out = set(), []
     for a in alts:
         if a and a not in seen:
-            seen.add(a); out.append(a)
+            seen.add(a)
+            out.append(a)
     return out
 
 
+def op_box_variant_filters(name):
+    """Keep One Piece print waves apart so a box is not valued at the wrong market.
+
+    OP01 ships as Wave 1 (blue bottom, ~$6.3k) and Wave 2 (white bottom, ~$1.6k)
+    with identical cards. Valuing a white box against the blue market would show
+    an ordinary listing as a 4x steal, so each wave carries its own terms.
+    """
+    n = norm(name)
+    if "wave 1" in n or "blue" in n:
+        return [["blue"]], []
+    if "wave 2" in n or "white" in n:
+        return [], ["blue"]
+    return [], []
+
+
+def op_code_for(sname):
+    """Look up a set code through norm() so punctuation can't break the match."""
+    target = norm(sname)
+    for k, v in OP_SET_CODES.items():
+        if norm(k) == target:
+            return v
+    return None
+
+
 def build_op_universe(keys, dump_rows=None):
-    """One Piece booster boxes. One universe entry per box SKU (waves kept apart)."""
-    uni = []
-    sets = [(sid, nm, cd) for sid, nm, cd in ONE_PIECE_SETS]
-    sets += [(sid, meta[0], meta[1]) for sid, meta in OP_MANUAL_MARKET.items()]
-    for sid, sname, scode in sets:
-        products = get_catalog(keys, sid)
-        boxes = []
-        for p in products:
-            nm = norm(p.get("name", ""))
-            if (p.get("type") or "").upper() != "BOOSTERBOX":
-                continue
-            if "case" in nm or "carton" in nm:
-                continue
-            mv = p.get("market_value")
-            if mv and float(mv) > 0:
-                boxes.append(p)
-            if dump_rows is not None:
-                dump_rows.append([f"[OP] {sname}", p.get("id"), p.get("name"), mv, "OP_BB"])
-
-        if not boxes and sid in OP_MANUAL_MARKET:
-            nm, cd, mv, asof = OP_MANUAL_MARKET[sid]
-            log(f"[OP] {nm}: pokedata has no sealed product; using MANUAL market "
-                f"${mv:.2f} (as of {asof}) -- review this entry")
-            uni.append({"product_id": f"opman-{sid}", "set_name": f"[OP] {nm}",
-                        "tcg": "One Piece", "type_key": "OP_BB",
-                        "type_label": "OP Booster Box", "is_case": False,
-                        "name": f"{nm} Booster Box", "market": round(float(mv), 2),
-                        "img": "", "query": f"One Piece {nm} Booster Box",
-                        "require": OP_BOX_REQUIRE + [op_identifier_group(nm, cd)],
-                        "exclude": OP_BOX_EXCLUDE, "market_src": "manual"})
+    """One Piece booster boxes, built from the full product catalogue."""
+    prods = get_all_products(keys)
+    boxes, seen_sets = [], set()
+    for p in prods:
+        if p.get("tcg") != "One Piece" or (p.get("type") or "").upper() != "BOOSTERBOX":
             continue
+        nm = norm(p.get("name", ""))
+        if "case" in nm or "carton" in nm or "display" in nm:
+            continue
+        if any(x in nm for x in OP_NOT_A_BOX):
+            continue
+        mv = p.get("market_value")
+        if not mv or float(mv) <= 0:
+            continue
+        boxes.append(p)
+        if dump_rows is not None:
+            dump_rows.append(["[OP] " + op_set_name_from_product(p.get("name")),
+                              p.get("id"), p.get("name"), mv, "OP_BB"])
 
-        if boxes and sid in OP_MANUAL_MARKET:
-            log(f"[OP] {sname}: pokedata now carries a booster box -- "
-                f"remove it from OP_MANUAL_MARKET")
+    uni = []
+    for p in boxes:
+        name = (p.get("name") or "").strip()
+        sname = op_set_name_from_product(name)
+        code = op_code_for(sname)
+        seen_sets.add(norm(sname))
+        ident = op_identifier_group(sname, code)
+        if not ident:
+            # An empty require group makes title_ok() always False, so the entry
+            # would sit in the universe burning a call and never matching. Fail
+            # loudly instead of shipping a silent dead spot.
+            log(f"[OP] SKIPPING {sname!r}: no set code and no distinctive name "
+                f"word -- add it to OP_SET_CODES")
+            continue
+        req_extra, exc_extra = op_box_variant_filters(name)
+        uni.append({
+            "product_id": str(p.get("id")), "set_name": f"[OP] {sname}",
+            "tcg": "One Piece", "type_key": "OP_BB",
+            "type_label": "OP Booster Box", "is_case": False, "name": name,
+            "market": round(float(p["market_value"]), 2), "img": p.get("img_url"),
+            "query": f"One Piece {sname} Booster Box",
+            "require": OP_BOX_REQUIRE + [ident] + req_extra,
+            "exclude": OP_BOX_EXCLUDE + exc_extra,
+        })
 
-        for p in boxes:
-            name = (p.get("name") or "").strip()
-            req_extra, exc_extra = op_box_variant_filters(name)
-            uni.append({
-                "product_id": str(p.get("id")), "set_name": f"[OP] {sname}",
-                "tcg": "One Piece", "type_key": "OP_BB",
-                "type_label": "OP Booster Box", "is_case": False, "name": name,
-                "market": round(float(p["market_value"]), 2), "img": p.get("img_url"),
-                "query": f"One Piece {sname} Booster Box",
-                "require": OP_BOX_REQUIRE + [op_identifier_group(sname, scode)] + req_extra,
-                "exclude": OP_BOX_EXCLUDE + exc_extra,
-            })
+    for key, (nm, cd, mv, asof) in OP_MANUAL_MARKET.items():
+        if key in seen_sets:
+            log(f"[OP] {nm}: pokedata now carries a booster box -- "
+                f"delete it from OP_MANUAL_MARKET")
+            continue
+        log(f"[OP] {nm}: not in pokedata's catalogue; using MANUAL market "
+            f"${mv:.2f} (as of {asof}) -- review this entry")
+        uni.append({"product_id": f"opman-{key}", "set_name": f"[OP] {nm}",
+                    "tcg": "One Piece", "type_key": "OP_BB",
+                    "type_label": "OP Booster Box", "is_case": False,
+                    "name": f"{nm} Booster Box", "market": round(float(mv), 2),
+                    "img": "", "query": f"One Piece {nm} Booster Box",
+                    "require": OP_BOX_REQUIRE + [op_identifier_group(nm, cd)],
+                    "exclude": OP_BOX_EXCLUDE, "market_src": "manual"})
+
     uni.sort(key=lambda x: (x["set_name"], x["name"]))
     return uni
 
