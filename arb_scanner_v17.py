@@ -117,6 +117,55 @@ ERA_SIBLING_EXCLUDES = {
 ENABLED_TYPES = ["ETB", "PC_ETB", "BB", "BUNDLE", "UPC", "SPC",
                  "ETB_CASE", "PC_ETB_CASE", "BB_CASE", "BUNDLE_CASE", "MINI_TIN_DISPLAY"]
 
+# ============ ONE PIECE (booster boxes only) ============
+# Added 2026-07-29. Booster boxes are the only One Piece sealed format with a
+# record worth acting on: measured from a near-launch buy the median box did
+# 2.5x, and every box in ~3 years of history that was bought and held is up.
+# Cases, starter decks and loose packs all underperformed the market, and the
+# loose Double Pack price data is too noisy to trade on -- so none are included.
+#
+# Market values come from the same pokedata /api/products endpoint the Pokemon
+# path uses, so this works unchanged on Render.
+ONE_PIECE_SETS = [
+    (3202, "Romance Dawn", "OP01"),
+    (3198, "Paramount War", "OP02"),
+    (3195, "Pillars of Strength", "OP03"),
+    (3191, "Kingdoms of Intrigue", "OP04"),
+    (3188, "Awakening of the New Era", "OP05"),
+    (3185, "Wings of the Captain", "OP06"),
+    (3180, "500 Years in the Future", "OP07"),
+    (3177, "Two Legends", "OP08"),
+    (3166, "Emperors in the New World", "OP09"),
+    (3163, "Royal Blood", "OP10"),
+    (3154, "A Fist of Divine Speed", "OP11"),
+    (3152, "Legacy of the Master", "OP12"),
+    (3631, "Carrying On His Will", "OP13"),
+    (3629, "The Azure Sea's Seven", "OP14"),
+    (3182, "Extra Booster Memorial Collection", "EB01"),
+    (3627, "Extra Booster One Piece Heroines Edition", "EB03"),
+    (3170, "Premium Booster The Best", "PRB01"),
+    (3150, "Premium Booster The Best Vol 2", "PRB02"),
+]
+
+# pokedata carries no sealed PRODUCTS for the newest sets yet -- verified
+# 2026-07-29: /api/products returns 0 rows for OP15, OP16 and ST-30 (cards only).
+# These are exactly the sets with the most active listings, so they get a manual
+# market value sourced from PriceCharting.
+#
+# THESE GO STALE. The scanner logs a warning every cycle it uses one, and logs
+# when pokedata starts carrying the product so the entry can be deleted. Review
+# whenever you see that message.
+OP_MANUAL_MARKET = {
+    # set_id: (set name, set code, booster box market value, as-of date)
+    3875: ("The Time of Battle", "OP16", 202.50, "2026-07-29"),
+    3836: ("Adventure on Kami's Island", "OP15", 240.22, "2026-07-29"),
+}
+
+# One Piece booster boxes must never match Pokemon listings, or a $200 One Piece
+# box gets valued against a Pokemon set's market. "one piece" is required on
+# every title and "pokemon" is excluded.
+OP_BOX_REQUIRE = [["one piece"], ["booster box", "booster display"]]
+
 BIN_MAX_RATIO, AUCTION_MAX_RATIO, AUCTION_MAX_HOURS = 0.80, 0.70, 24
 SHIP_UNKNOWN_MAX_RATIO = 0.65
 BIN_MIN_RATIO, AUCTION_MIN_RATIO = 0.20, 0.10
@@ -145,8 +194,8 @@ MARKET_REFRESH_HOURS = 6
 #
 # If you change one of these, recheck the other: cycles_per_day = 1440/CYCLE_MINUTES
 # and cycles_per_day * MAX_CALLS_PER_CYCLE must stay under 5,000.
-CYCLE_MINUTES = int(os.environ.get("EDL_CYCLE_MIN", "240"))
-MAX_CALLS_PER_CYCLE = int(os.environ.get("EDL_MAX_CALLS", "780"))
+CYCLE_MINUTES = int(os.environ.get("EDL_CYCLE_MIN", "480"))
+MAX_CALLS_PER_CYCLE = int(os.environ.get("EDL_MAX_CALLS", "600"))
 MIN_FEEDBACK_SCORE = int(os.environ.get("EDL_MIN_FEEDBACK", "1"))     # 0-feedback sellers excluded
 RATE_LIMIT_PAUSE_MIN = 60
 EBAY_MARKETPLACE = "EBAY_US"
@@ -198,6 +247,12 @@ JUNK = JUNK_BASE + LANGS
 GEM_EXCLUDE = JUNK_BASE + [l for l in LANGS if l not in CHINESE] + ["pokemon go", "digital", "online", "app", "ios", "android"]
 LANG_REJECT = ["japanese", "japan", "korean", "chinese", "french", "german", "spanish", "italian",
                "portuguese", "dutch", "polish", "russian", "thai", "indonesian", "vietnamese"]
+
+# One Piece box exclusions: the usual junk, every non-English language, anything
+# case-sized, and Pokemon itself (a cross-match would value a One Piece box
+# against a Pokemon market).
+OP_BOX_EXCLUDE = JUNK + ["pokemon", "case", "carton", "starter deck", "ultra deck",
+                         "double pack", "sleeved", "single pack", "tin", "deck box"]
 
 GEM_REQUIRE = [["gem pack"], ["case"]]
 GEM_PACKS = [
@@ -405,6 +460,97 @@ def pick_base(plist):
     pool.sort(key=lambda p: (len(p.get("name", "")), int(p["id"]) if str(p.get("id", "")).isdigit() else 0))
     return pool[0]
 
+def op_box_variant_filters(name):
+    """Distinguish One Piece print waves so a box isn't valued at the wrong market.
+
+    OP01 exists as Wave 1 (blue bottom, ~$6.3k) and Wave 2 (white bottom, ~$1.6k)
+    with identical cards. Valuing a white-bottom box against the blue market would
+    make an ordinary listing look like a 4x steal, so each wave carries its own
+    require/exclude terms.
+    """
+    n = norm(name)
+    if "wave 1" in n or "blue" in n:
+        return [["blue"]], []                    # only match explicit blue-bottom
+    if "wave 2" in n or "white" in n:
+        return [], ["blue"]                      # default box; never match blue
+    return [], []
+
+
+def op_identifier_group(sname, code):
+    """Accept EITHER the set code or a distinctive set word.
+
+    Sellers often title a box "One Piece OP-16 Booster Box" with no set name at
+    all. Requiring every set-name token would silently miss those. Short tokens
+    are dropped so a generic word can't create a false match; "one piece" and
+    "booster box" are required separately, so this group only has to identify
+    WHICH set.
+    """
+    # norm() converts hyphens to SPACES, so "OP-16" in a title becomes "op 16".
+    # Cover the joined and spaced spellings; the hyphenated form never survives norm.
+    letters = code.rstrip("0123456789").lower()
+    digits = code[len(letters):]
+    alts = [f"{letters}{digits}", f"{letters} {digits}"]
+    alts += [t for t in set_tokens(sname) if len(t) >= 6]
+    seen, out = set(), []
+    for a in alts:
+        if a and a not in seen:
+            seen.add(a); out.append(a)
+    return out
+
+
+def build_op_universe(keys, dump_rows=None):
+    """One Piece booster boxes. One universe entry per box SKU (waves kept apart)."""
+    uni = []
+    sets = [(sid, nm, cd) for sid, nm, cd in ONE_PIECE_SETS]
+    sets += [(sid, meta[0], meta[1]) for sid, meta in OP_MANUAL_MARKET.items()]
+    for sid, sname, scode in sets:
+        products = get_catalog(keys, sid)
+        boxes = []
+        for p in products:
+            nm = norm(p.get("name", ""))
+            if (p.get("type") or "").upper() != "BOOSTERBOX":
+                continue
+            if "case" in nm or "carton" in nm:
+                continue
+            mv = p.get("market_value")
+            if mv and float(mv) > 0:
+                boxes.append(p)
+            if dump_rows is not None:
+                dump_rows.append([f"[OP] {sname}", p.get("id"), p.get("name"), mv, "OP_BB"])
+
+        if not boxes and sid in OP_MANUAL_MARKET:
+            nm, cd, mv, asof = OP_MANUAL_MARKET[sid]
+            log(f"[OP] {nm}: pokedata has no sealed product; using MANUAL market "
+                f"${mv:.2f} (as of {asof}) -- review this entry")
+            uni.append({"product_id": f"opman-{sid}", "set_name": f"[OP] {nm}",
+                        "tcg": "One Piece", "type_key": "OP_BB",
+                        "type_label": "OP Booster Box", "is_case": False,
+                        "name": f"{nm} Booster Box", "market": round(float(mv), 2),
+                        "img": "", "query": f"One Piece {nm} Booster Box",
+                        "require": OP_BOX_REQUIRE + [op_identifier_group(nm, cd)],
+                        "exclude": OP_BOX_EXCLUDE, "market_src": "manual"})
+            continue
+
+        if boxes and sid in OP_MANUAL_MARKET:
+            log(f"[OP] {sname}: pokedata now carries a booster box -- "
+                f"remove it from OP_MANUAL_MARKET")
+
+        for p in boxes:
+            name = (p.get("name") or "").strip()
+            req_extra, exc_extra = op_box_variant_filters(name)
+            uni.append({
+                "product_id": str(p.get("id")), "set_name": f"[OP] {sname}",
+                "tcg": "One Piece", "type_key": "OP_BB",
+                "type_label": "OP Booster Box", "is_case": False, "name": name,
+                "market": round(float(p["market_value"]), 2), "img": p.get("img_url"),
+                "query": f"One Piece {sname} Booster Box",
+                "require": OP_BOX_REQUIRE + [op_identifier_group(sname, scode)] + req_extra,
+                "exclude": OP_BOX_EXCLUDE + exc_extra,
+            })
+    uni.sort(key=lambda x: (x["set_name"], x["name"]))
+    return uni
+
+
 def build_universe(keys, setid_map, dump=False):
     uni, dump_rows = [], []
     for sn in PRIORITY_SETS:
@@ -429,7 +575,8 @@ def build_universe(keys, setid_map, dump=False):
             q = name if "pokemon" in name.lower() else "Pokemon " + name
             # A base era set must not swallow listings from its own era's sets.
             excl = t["exclude"] + ERA_SIBLING_EXCLUDES.get(norm(sn), [])
-            uni.append({"product_id": str(base.get("id")), "set_name": sn, "type_key": key,
+            uni.append({"product_id": str(base.get("id")), "set_name": sn,
+                        "tcg": "Pokemon", "type_key": key,
                         "type_label": t["label"], "is_case": key in CASE_TYPES, "name": name,
                         "market": round(float(mv), 2), "img": base.get("img_url"), "query": q,
                         "require": [[s] for s in set_tokens(sn)] + t["require"], "exclude": excl})
@@ -587,17 +734,11 @@ def scan(token, universe, existing_ids, cycle_iso):
             log(f"per-cycle call budget ({MAX_CALLS_PER_CYCLE}) reached — deferring remaining products to next cycle")
             break
         market = prod["market"]
-        ceil = round(market * prod.get("bin_ratio", BIN_MAX_RATIO), 2)
-        bin_filt = f"buyingOptions:{{FIXED_PRICE}},conditionIds:{{1000}},price:[..{ceil}],priceCurrency:USD"
-        for it in ebay_search(token, prod["query"], bin_filt, sort="price", limit=BIN_LIMIT):
-            iid, title = it.get("itemId"), it.get("title", "")
-            if not iid or iid in seen or not match_title(title, prod): continue
-            if not seller_ok(it): continue
-            if not prod.get("skip_case_gate") and is_true_case(title) != prod["is_case"]: continue
-            o = eval_bin(it, prod)
-            if o:
-                o["first_seen"] = o["last_validated"] = cycle_iso; new.append(o); seen.add(iid)
-        time.sleep(POLITE_SLEEP)
+        # 2026-07-29: fixed-price (Buy It Now) scanning removed entirely. That
+        # side of eBay is dominated by mispriced, mislabelled and outright scam
+        # listings for sealed TCG product, so the hit rate never justified the
+        # calls. Dropping it also halves the per-product cost from 2 calls to 1,
+        # which is what pays for the One Piece additions.
         lo = now_utc().strftime("%Y-%m-%dT%H:%M:%S.000Z")
         hi = (now_utc() + timedelta(hours=AUCTION_MAX_HOURS)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         auc_filt = f"buyingOptions:{{AUCTION}},conditionIds:{{1000}},itemEndDate:[{lo}..{hi}]"
@@ -628,17 +769,7 @@ def validate(token, opps, uni_by_pid, cycle_iso):
         if end and end <= now_utc(): continue
         market = prod["market"]; mn = prod.get("min_total", 0)
         if o["kind"] == "BIN":
-            price = money(d.get("price"))
-            if price is None: continue
-            bmax = prod.get("bin_ratio", BIN_MAX_RATIO)
-            ship, known = shipping_from(d)
-            total = price + (ship or 0) if known else price
-            ratio = total / market if known else price / market
-            ok = (total <= market * bmax) if known else (price <= market * min(SHIP_UNKNOWN_MAX_RATIO, bmax))
-            if not ok or ratio < BIN_MIN_RATIO or total < mn: continue
-            o.update({"item_price": round(price, 2), "shipping": (round(ship, 2) if known and ship is not None else None),
-                      "shipping_known": known, "total": round(total, 2), "ratio": round(ratio, 3),
-                      "market": market, "mkt_est": prod.get("market_src", "set") == "ask-median", "last_validated": cycle_iso})
+            continue          # BIN retired 2026-07-29; drop any stale BIN opps
         else:
             bid = money(d.get("currentBidPrice"))
             if bid is None: continue
@@ -742,7 +873,6 @@ button.dq{background:transparent;color:var(--muted);border:1px solid var(--line)
 <div class="sec pg" id="pgsec"><h2>Our Pricing · Below Market</h2>
   <div class="note" id="pgnote"></div><div class="pgrid" id="pg"></div></div>
 <div class="sec auc"><h2>Auctions · Ending Soon</h2><div class="grid" id="auc"></div></div>
-<div class="sec bin"><h2>Buy It Now</h2><div class="grid" id="bin"></div></div>
 <script>
 const OPPS=__OPPS_JSON__, CAP=__CAP__, DQKEY="arb_disq"; let showDq=false;
 const PRICE_ALERTS=__PRICE_ALERTS__, PRICE_STATS=__PRICE_STATS__;
@@ -779,15 +909,14 @@ function card(o,isDq,i){
   return d;
 }
 function render(){
-  const dd=dq(),B=document.getElementById("bin"),A=document.getElementById("auc");B.innerHTML="";A.innerHTML="";
-  let act=OPPS.filter(o=>o.kind!=="AUCTION"||hrs(o.end_date)>0);
+  const dd=dq(),A=document.getElementById("auc");A.innerHTML="";
+  let act=OPPS.filter(o=>o.kind==="AUCTION"&&hrs(o.end_date)>0);
   let vis=act.filter(o=>showDq?dd.includes(o.item_id):!dd.includes(o.item_id));
-  let bins=vis.filter(o=>o.kind==="BIN").sort((a,b)=>a.ratio-b.ratio).slice(0,CAP);
-  let aucs=vis.filter(o=>o.kind==="AUCTION").sort((a,b)=>hrs(a.end_date)-hrs(b.end_date)).slice(0,CAP);
-  bins.forEach((o,i)=>B.appendChild(card(o,showDq,i)));aucs.forEach((o,i)=>A.appendChild(card(o,showDq,i)));
-  if(!bins.length)B.innerHTML='<div class="empty">none</div>';if(!aucs.length)A.innerHTML='<div class="empty">none</div>';
+  let aucs=vis.sort((a,b)=>hrs(a.end_date)-hrs(b.end_date)).slice(0,CAP);
+  aucs.forEach((o,i)=>A.appendChild(card(o,showDq,i)));
+  if(!aucs.length)A.innerHTML='<div class="empty">none</div>';
   const nd=act.filter(o=>dd.includes(o.item_id)).length;
-  document.getElementById("counts").textContent=bins.length+" BIN · "+aucs.length+" auction"+(showDq?" (disqualified)":"");
+  document.getElementById("counts").textContent=aucs.length+" auction"+(showDq?" (disqualified)":"");
   document.getElementById("toggle").textContent=showDq?"← active":"disqualified ("+nd+")";
 }
 function renderPrice(){
@@ -910,7 +1039,7 @@ def main():
     render_dashboard(opps, now_utc().isoformat(), price_alerts, price_stats)
     try:
         tok = keys.ebay_token()
-        universe = build_universe(keys, setid_map, dump=True) + gem_universe(tok)
+        universe = build_universe(keys, setid_map, dump=True) + build_op_universe(keys) + gem_universe(tok)
         write_universe_report(universe)
         by_t = Counter(p["type_label"] for p in universe)
         log(f"universe: {len(universe)} products ({len(PRIORITY_SETS)} sets + {len(GEM_PACKS)} gem cases)")
@@ -924,7 +1053,7 @@ def main():
         _calls["n"] = 0
         try:
             tok = keys.ebay_token()
-            universe = build_universe(keys, setid_map) + gem_universe(tok)
+            universe = build_universe(keys, setid_map) + build_op_universe(keys) + gem_universe(tok)
             uni_by_pid = {p["product_id"]: p for p in universe}
             opps = validate(tok, opps, uni_by_pid, cycle_iso)
             added = scan(tok, universe, {o["item_id"] for o in opps}, cycle_iso)
