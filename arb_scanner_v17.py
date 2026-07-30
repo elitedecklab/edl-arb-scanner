@@ -44,7 +44,13 @@ except Exception as _e:                                    # scanner must run re
 IS_CLOUD      = bool(os.environ.get("RENDER") or os.environ.get("EDL_CLOUD"))
 PROJECT_DIR   = os.environ.get("EDL_DIR", r"D:\Arbitrage Scanner")
 os.makedirs(PROJECT_DIR, exist_ok=True)
-ALL_SETS_JSON = r"C:\Users\adam.george\Documents\Price Scraper\Data\Pokedata Cache\all_sets.json"
+# Set name -> set_id now comes from pokedata live (see build_setid_map). This
+# file is only a last-resort cache if that call fails. The old value pointed at
+# C:\Users\adam.george\... -- a user profile that does not exist on this machine
+# -- so the map silently fell back to SETID_FALLBACK alone and any set added to
+# PRIORITY_SETS without a hardcoded id was skipped with one easily-missed line.
+ALL_SETS_JSON = os.environ.get(
+    "EDL_ALL_SETS_JSON", r"D:\Price Scraper\pokedata_cache\all_sets.json")
 EBAY_KEYS     = os.path.join(PROJECT_DIR, "eBay Keys.txt")
 POKEDATA_KEYS = os.path.join(PROJECT_DIR, "Pokedata Keys.txt")
 MARKET_CACHE  = os.path.join(PROJECT_DIR, "market_cache.json")
@@ -427,15 +433,52 @@ def set_tokens(set_name):
 
 
 # --------------------------- name -> set_id ---------------------------
-def build_setid_map():
-    m = {}
-    sets = load_json(ALL_SETS_JSON, None)
-    if isinstance(sets, list):
-        for s in sets:
-            if isinstance(s, dict) and s.get("name") and s.get("id") is not None and s.get("language", "ENGLISH") == "ENGLISH":
-                m[norm(s["name"])] = s["id"]
+def build_setid_map(keys=None):
+    """Map normalised set name -> pokedata set_id.
+
+    Order of preference:
+      1. pokedata /api/sets live      -- self-maintaining, works on Render
+      2. ALL_SETS_JSON on disk        -- cache, only if the call fails
+      3. SETID_FALLBACK              -- hardcoded, always merged in last
+
+    Every source is merged rather than replacing the others, so a hardcoded id
+    still wins for sets whose pokedata name differs from the name we use here
+    ("151" vs "Pokemon Card 151", "Scarlet & Violet" vs "Scarlet & Violet Base").
+    """
+    m, src = {}, "none"
+    if keys is not None:
+        try:
+            r = requests.get("https://www.pokedata.io/api/sets",
+                             headers={"Authorization": f"Bearer {keys.pokedata}"},
+                             params={"tcg": "Pokemon"}, timeout=60)
+            if r.status_code == 200 and isinstance(r.json(), list):
+                for st in r.json():
+                    if (st.get("name") and st.get("id") is not None
+                            and (st.get("language") or "ENGLISH").upper() == "ENGLISH"):
+                        m[norm(st["name"])] = st["id"]
+                src = f"pokedata live ({len(m)} sets)"
+                save_json(ALL_SETS_JSON, r.json())
+        except Exception as e:
+            log(f"set list: live fetch failed ({e}); falling back to cache")
+
+    if not m:
+        cached = load_json(ALL_SETS_JSON, None)
+        if isinstance(cached, list):
+            for st in cached:
+                if (isinstance(st, dict) and st.get("name") and st.get("id") is not None
+                        and (st.get("language") or "ENGLISH").upper() == "ENGLISH"):
+                    m[norm(st["name"])] = st["id"]
+            src = f"disk cache {ALL_SETS_JSON} ({len(m)} sets)"
+
+    before = len(m)
     for k, v in SETID_FALLBACK.items():
         m.setdefault(norm(k), v)
+    log(f"set id map: {src}, +{len(m) - before} from SETID_FALLBACK, {len(m)} total")
+
+    missing = [sn for sn in PRIORITY_SETS if norm(sn) not in m]
+    if missing:
+        log(f"WARNING: {len(missing)} set(s) in PRIORITY_SETS have no set_id and "
+            f"WILL BE SKIPPED: {missing}")
     return m
 
 
@@ -623,7 +666,8 @@ def build_universe(keys, setid_map, dump=False):
     for sn in PRIORITY_SETS:
         sid = setid_map.get(norm(sn))
         if sid is None:
-            log(f"skip {sn!r}: no set_id found"); continue
+            log(f"WARNING skip {sn!r}: no set_id -- add it to SETID_FALLBACK "
+                f"or check its pokedata spelling"); continue
         allowed = SET_TYPE_LIMITS.get(norm(sn))       # None = scan every enabled type
         cand = defaultdict(list)
         for p in get_catalog(keys, sid):
@@ -1100,7 +1144,7 @@ def main():
     time.sleep(0.5)
     log(f"dashboard serving on {DASH_HOST}:{DASH_PORT}" + ("" if IS_CLOUD else "  (open http://localhost:%d/)" % DASH_PORT))
     open_dashboard()
-    setid_map = build_setid_map()
+    setid_map = build_setid_map(keys)
     # Price guard runs on open, before the (slower) eBay work.
     price_alerts, price_stats = run_price_guard(keys, setid_map)
     render_dashboard(opps, now_utc().isoformat(), price_alerts, price_stats)
