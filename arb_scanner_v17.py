@@ -219,7 +219,15 @@ MAX_CALLS_PER_CYCLE = int(os.environ.get("EDL_MAX_CALLS", "600"))
 MIN_FEEDBACK_SCORE = int(os.environ.get("EDL_MIN_FEEDBACK", "1"))     # 0-feedback sellers excluded
 RATE_LIMIT_PAUSE_MIN = 60
 EBAY_MARKETPLACE = "EBAY_US"
-BIN_LIMIT, AUCTION_LIMIT, MAX_PER_SECTION, POLITE_SLEEP = 50, 100, 80, 0.2
+# AUCTION_LIMIT is eBay's page size, max 200, and costs the same one call at any
+# value. It matters more than it looks: eBay SILENTLY IGNORES the itemEndDate
+# filter we send (verified 2026-07-29 -- identical results with and without it),
+# so a query returns everything and eval_auction() does the real ending-soon
+# check locally. When a query has more matches than the page size, the results
+# are truncated in no useful order, and auctions ending within 24h can fall off
+# the page entirely. Two of 21 One Piece queries were hitting the old 100 cap;
+# raising it to 200 recovered 4 more near-term auctions on OP16 alone.
+BIN_LIMIT, AUCTION_LIMIT, MAX_PER_SECTION, POLITE_SLEEP = 50, 200, 80, 0.2
 GEM_ASK_SAMPLE, GEM_ASK_MIN = 100, 4
 EBAY_BROWSE = "https://api.ebay.com/buy/browse/v1/item_summary/search"
 EBAY_ITEM   = "https://api.ebay.com/buy/browse/v1/item/"
@@ -267,6 +275,24 @@ JUNK = JUNK_BASE + LANGS
 GEM_EXCLUDE = JUNK_BASE + [l for l in LANGS if l not in CHINESE] + ["pokemon go", "digital", "online", "app", "ios", "android"]
 LANG_REJECT = ["japanese", "japan", "korean", "chinese", "french", "german", "spanish", "italian",
                "portuguese", "dutch", "polish", "russian", "thai", "indonesian", "vietnamese"]
+
+# Multi-unit listings. A lot of 6 packs priced at $35 against a $260 box market
+# reads as an 86%-off steal; a lot of 10 boxes reads the same way in reverse once
+# it is valued as one box. The JUNK list catches "lot of (2)" through the word
+# "lot", but not a bare "(6)" prefix or a plural "Booster Boxes", both of which
+# were slipping through. Applied in match_title() for every product, both games.
+# "2 or more", written so multi-digit counts starting with 1 still match. A bare
+# [2-9]\d* misses "(12)" and "12 x" because those begin with a 1, which is
+# exactly the quantity range that matters most for case-sized lots.
+_QTY2PLUS = r"(?:[2-9]\d*|1\d+)"
+MULTI_QTY_RE = re.compile(
+    r"^\s*\(\s*" + _QTY2PLUS + r"\s*\)"              # leading "(6)" / "(12)"
+    r"|\blot\s*of\s*\(?\s*\d+"                       # "lot of (10)"
+    r"|\b" + _QTY2PLUS + r"\s*x\s*(?:booster\s*)?box(?:es)?\b"   # "6x booster box"
+    r"|^\s*" + _QTY2PLUS + r"\s*x\b"                   # leading "6x ..." / "12 x ..."
+    r"|\bbooster\s*boxes\b"                          # plural = more than one
+    r"|\bboxes\b\s*(?:sealed|lot|bundle)"             # "Boxes Sealed"
+    r"|\bset\s*of\s*" + _QTY2PLUS + r"\b", re.I)                    # leading "6x ..."
 
 # One Piece box exclusions: the usual junk, every non-English language, anything
 # case-sized, and Pokemon itself (a cross-match would value a One Piece box
@@ -712,6 +738,11 @@ def title_ok(title, require_groups, exclude):
 
 def match_title(title, prod):
     if not title_ok(title, prod["require"], prod["exclude"]): return False
+    # Reject multi-unit lots for SINGLE-unit products only: they are priced for
+    # the lot, so valuing one against a single-unit market invents a discount.
+    # Case products are exempt -- a case IS several boxes, so "Sealed Case 6
+    # Booster Boxes" is exactly the listing we want, not a lot to discard.
+    if not prod.get("is_case") and MULTI_QTY_RE.search(title or ""): return False
     vr = prod.get("vol_re")
     if vr is not None and not vr.search(norm(title)): return False
     return True
